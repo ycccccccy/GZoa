@@ -5,9 +5,10 @@ import '../utils/status_bar_utils.dart';
 import '../services/course_service.dart';
 import '../widgets/shimmer_widgets.dart';
 import '../widgets/animated_widgets.dart';
-import 'course_detail_page.dart';
+import 'all_courses_page.dart';
 import 'auto_course_selection_page.dart';
 import 'login_page.dart';
+import 'package:gzoa/pages/course_detail_page.dart';
 
 class CourseSelectionPage extends StatefulWidget {
   const CourseSelectionPage({super.key});
@@ -19,23 +20,15 @@ class CourseSelectionPage extends StatefulWidget {
 class _CourseSelectionPageState extends State<CourseSelectionPage> {
   String _userName = '';
   bool _isLoading = true;
-  List<CourseType> _schoolTypes = [];
-  List<CourseType> _communityTypes = [];
-  List<Course> _courses = [];
   List<Course> _mySchoolCourses = [];
   List<Course> _myCommunityCourses = [];
   
   // 当前页面状态
   CoursePageState _currentState = CoursePageState.selectType;
   
-  // 当前显示的课程类型
-  String? _currentCourseType;
-  bool _isSchoolBased = true;
-  
   @override
   void initState() {
     super.initState();
-    // 浅色状态栏
     StatusBarUtils.setLightStatusBar();
     _initializeApp();
   }
@@ -44,8 +37,8 @@ class _CourseSelectionPageState extends State<CourseSelectionPage> {
     try {
       // 先加载用户信息
       await _loadUserInfo();
-      // 然后加载课程类型
-      await _loadCourseTypes();
+      // 然后只加载已报名课程
+      await _loadEnrolledCourses();
     } catch (e) {
       setState(() {
         _isLoading = false;
@@ -66,150 +59,44 @@ class _CourseSelectionPageState extends State<CourseSelectionPage> {
     }
   }
 
-  Future<void> _loadCourseTypes() async {
+  Future<void> _loadEnrolledCourses() async {
     setState(() {
       _isLoading = true;
     });
 
     try {
-      // 添加重试机制，最多重试3次
-      int retryCount = 0;
-      const maxRetries = 3;
-      
-      while (retryCount < maxRetries) {
-        try {
-          // 并行加载校本课程和社团课程类型，以及已报名课程
-          final schoolResult = await CourseService.getSchoolBasedCourseTypes();
-          final communityResult = await CourseService.getCommunityCourseTypes();
-          final mySchoolResult = await CourseService.getMySchoolBasedCourses();
-          final myCommunityResult = await CourseService.getMyCommunityCourses();
+      // 并行加载已报名的校本课程和社团课程
+      final results = await Future.wait([
+        CourseService.getMySchoolBasedCourses(),
+        CourseService.getMyCommunityCourses(),
+      ]);
 
-          // 调试信息
+      final mySchoolResult = results[0];
+      final myCommunityResult = results[1];
 
-          setState(() {
-            if (schoolResult.isSuccess && schoolResult.data != null) {
-              _schoolTypes = schoolResult.data!;
-            }
-            if (communityResult.isSuccess && communityResult.data != null) {
-              _communityTypes = communityResult.data!;
-            }
-            if (mySchoolResult.isSuccess && mySchoolResult.data != null) {
-              _mySchoolCourses = mySchoolResult.data!;
-            }
-            if (myCommunityResult.isSuccess && myCommunityResult.data != null) {
-              _myCommunityCourses = myCommunityResult.data!;
-            }
-            _isLoading = false;
-          });
-
-          // 如果至少有一个课程类型成功，或者至少有一个历史报名成功，就退出重试循环
-          if (schoolResult.isSuccess || communityResult.isSuccess || 
-              mySchoolResult.isSuccess || myCommunityResult.isSuccess) {
-            break;
-          }
-          
-          // 如果所有都失败了，进行重试
-          retryCount++;
-          if (retryCount < maxRetries) {
-            await Future.delayed(Duration(milliseconds: 1000 * retryCount));
-          }
-        } catch (e) {
-          retryCount++;
-          if (retryCount < maxRetries) {
-            await Future.delayed(Duration(milliseconds: 1000 * retryCount));
-          }
+      setState(() {
+        if (mySchoolResult.isSuccess && mySchoolResult.data != null) {
+          _mySchoolCourses = mySchoolResult.data!;
         }
-      }
-      
-      // 如果所有重试都失败了，只有当历史报名课程也获取失败时才显示错误信息
-      if (retryCount >= maxRetries) {
-        setState(() {
-          _isLoading = false;
-        });
-        
-        // 检查历史课程
-        final hasHistoryData = _mySchoolCourses.isNotEmpty || _myCommunityCourses.isNotEmpty;
-        
-        if (!hasHistoryData) {
-          // 历史报名课程也获取失败，显示网络错误
-          _showMessage('无法连接到服务器，请检查网络设置');
+        if (myCommunityResult.isSuccess && myCommunityResult.data != null) {
+          _myCommunityCourses = myCommunityResult.data!;
         }
-        // 如果能获取到历史数据但获取不到当前可报名课程，则不显示错误toast
-        // 这种情况说明当前没有可报名的课程，属于正常情况
+        _isLoading = false;
+      });
+
+      if (!mySchoolResult.isSuccess && !myCommunityResult.isSuccess) {
+        _showMessage('无法获取已报名课程，请检查网络设置');
       }
     } catch (e) {
       setState(() {
         _isLoading = false;
       });
-      _showMessage('加载课程类型失败: $e');
+      _showMessage('加载已报名课程失败: $e');
     }
   }
-
-  Future<void> _loadAllCourses(bool isSchoolBased) async {
-    setState(() {
-      _isLoading = true;
-      _currentState = CoursePageState.selectCourse;
-      _isSchoolBased = isSchoolBased;
-      _currentCourseType = isSchoolBased ? '校本课程' : '社团课程';
-    });
-
-    try {
-      List<Course> allCourses = [];
-      Set<String> courseIds = {}; // 用于去重
-
-      if (isSchoolBased) {
-        // 加载所有校本课程类型
-        for (final type in _schoolTypes) {
-          final result = await CourseService.getSchoolBasedCourses(type.id);
-          if (result.isSuccess && result.data != null) {
-            // 去重处理
-            for (final course in result.data!) {
-              if (!courseIds.contains(course.id)) {
-                courseIds.add(course.id);
-                allCourses.add(course);
-              }
-            }
-          }
-        }
-      } else {
-        // 加载所有社团课程类型
-        for (final type in _communityTypes) {
-          final result = await CourseService.getCommunityCourses(type.id);
-          if (result.isSuccess && result.data != null) {
-            // 去重处理
-            for (final course in result.data!) {
-              if (!courseIds.contains(course.id)) {
-                courseIds.add(course.id);
-                allCourses.add(course);
-              }
-            }
-          }
-        }
-      }
-
-      setState(() {
-        _courses = allCourses;
-        _isLoading = false;
-      });
-    } catch (e) {
-      setState(() {
-        _isLoading = false;
-        _currentState = CoursePageState.selectType;
-      });
-      _showMessage('加载课程失败: $e');
-    }
-  }
-
-
-
 
   String _getAppBarTitle() {
-    switch (_currentState) {
-      case CoursePageState.selectType:
-        return '课程选择';
-      case CoursePageState.selectCourse:
-        return _currentCourseType ?? '课程列表';
-    }
+    return '课程选择';
   }
 
   void _showCourseOptions(BuildContext context, bool isSchoolBased) {
@@ -264,7 +151,12 @@ class _CourseSelectionPageState extends State<CourseSelectionPage> {
               ),
               onTap: () {
                 Navigator.pop(context);
-                _loadAllCourses(isSchoolBased);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => AllCoursesPage(isSchoolBased: isSchoolBased),
+                  ),
+                );
               },
             ),
             
@@ -439,7 +331,7 @@ class _CourseSelectionPageState extends State<CourseSelectionPage> {
       if (result.isSuccess) {
         _showMessage('报名成功！');
         // 刷新已报名课程
-        _loadCourseTypes();
+        await _loadEnrolledCourses();
       } else {
         _showMessage('报名失败: ${result.message}');
       }
@@ -608,7 +500,7 @@ class _CourseSelectionPageState extends State<CourseSelectionPage> {
         actions: [
           if (_currentState == CoursePageState.selectType) ...[
             IconButton(
-              onPressed: _isLoading ? null : _loadCourseTypes,
+              onPressed: _isLoading ? null : _loadEnrolledCourses,
               icon: _isLoading
                   ? const SizedBox(
                       width: 20,
@@ -616,7 +508,7 @@ class _CourseSelectionPageState extends State<CourseSelectionPage> {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : const Icon(Icons.refresh_rounded),
-              tooltip: '刷新课程类型',
+              tooltip: '刷新',
             ),
           ],
           PopupMenuButton<String>(
@@ -688,7 +580,7 @@ class _CourseSelectionPageState extends State<CourseSelectionPage> {
       ),
       body: _isLoading
           ? _buildShimmerContent(context, isMobile)
-          : _buildCurrentState(context, isMobile),
+          : _buildTypeSelection(context, isMobile),
     );
   }
 
@@ -809,15 +701,6 @@ class _CourseSelectionPageState extends State<CourseSelectionPage> {
           ),
         ),
       );
-    }
-  }
-
-  Widget _buildCurrentState(BuildContext context, bool isMobile) {
-    switch (_currentState) {
-      case CoursePageState.selectType:
-        return _buildTypeSelection(context, isMobile);
-      case CoursePageState.selectCourse:
-        return _buildCourseSelection(context, isMobile);
     }
   }
 
@@ -1566,63 +1449,6 @@ class _CourseSelectionPageState extends State<CourseSelectionPage> {
             ),
           ],
         ),
-      ),
-    );
-  }
-
-    
-  Widget _buildCourseSelection(BuildContext context, bool isMobile) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const SizedBox(height: 20),
-          
-          // 课程列表
-          if (_courses.isEmpty)
-            Center(
-              child: Padding(
-                padding: const EdgeInsets.all(32),
-                    child: Column(
-                      children: [
-                              Icon(
-                      Icons.info_outline_rounded,
-                      size: 48,
-                      color: Colors.grey[400],
-                    ),
-                    const SizedBox(height: 16),
-                          Text(
-                      '暂无课程',
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        color: Colors.grey[600],
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                          Text(
-                      '请稍后重试或联系管理员',
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: Colors.grey[500],
-                                ),
-                              ),
-                          ],
-                        ),
-              ),
-            )
-          else
-            ListView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: _courses.length,
-              itemBuilder: (context, index) {
-                final course = _courses[index];
-                return AnimatedWidgets.animatedListItem(
-                  index: index,
-                  child: _buildCourseItem(context, course, _isSchoolBased),
-                );
-              },
-            ),
-        ],
       ),
     );
   }

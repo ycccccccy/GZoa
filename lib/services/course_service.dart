@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../config/env_config.dart';
 
 class CourseService {
+  
   // 获取API基础URL
   static String get baseUrl {
     return EnvConfig.instance.baseUrl;
@@ -35,291 +36,238 @@ class CourseService {
     };
   }
 
-  // 校本课程 - 获取课程类型列表
-  static Future<ApiResult<List<CourseType>>> getSchoolBasedCourseTypes() async {
-    try {
-      final timestamp = _getTimestamp();
-      final headers = await _getHeaders();
-      final url = '$baseUrl/ApiBooking/GetTypeList?t=$timestamp';
-      
-      final response = await http.post(
-        Uri.parse(url),
-        headers: headers,
-        body: jsonEncode({
-          'page': 1,
-          'limit': 100,
-          'keywords': '',
-        }),
-      );
+  // 通用分页数据拉取方法 - 支持keywords查询
+  static Future<List<Map<String, dynamic>>> _fetchAllPages({
+    required String endpoint,
+    required Map<String, dynamic> baseParams,
+    bool isSecondAccount = false,
+  }) async {
+    List<Map<String, dynamic>> allData = [];
+    int currentPage = 1;
+    bool hasMoreData = true;
+    int? totalCount;
 
-      if (response.statusCode == 200) {
-        final responseData = jsonDecode(response.body);
+    while (hasMoreData) {
+      try {
+        final timestamp = _getTimestamp();
+        final headers = await _getHeaders(isSecondAccount: isSecondAccount);
         
-        if (responseData['Success'] == true) {
-          final data = responseData['Data'] as List;
-          final types = data.map((item) => CourseType.fromJson(item)).toList();
-          return ApiResult.success(types);
+        final params = Map<String, dynamic>.from(baseParams);
+        params['page'] = currentPage;
+        params['limit'] = 10; // 使用真实API的默认分页大小
+        
+        final response = await http.post(
+          Uri.parse('$baseUrl$endpoint?t=$timestamp'),
+          headers: headers,
+          body: jsonEncode(params),
+        );
+
+        if (response.statusCode == 200) {
+          final responseData = jsonDecode(response.body);
+          // 打印原始响应数据，方便调试
+          
+          // 兼容两种数据结构
+          List<dynamic>? data;
+          // 优先解析Data字段，即使Success为false
+          if (responseData['Data'] != null && responseData['Data'] is List) {
+            // 结构 1: { "Success": true/false, "Data": [...], "Total": ... }
+            data = responseData['Data'] as List;
+            totalCount = responseData['Total'] as int?;
+          } else if (responseData['Item1'] != null && 
+                     responseData['Item1']['Data'] != null && 
+                     responseData['Item1']['Data'] is List) {
+            // 结构 2: { "Item1": { "Data": [...], "Total": ... } }
+            final item1 = responseData['Item1'];
+            data = item1['Data'] as List;
+            totalCount = item1['Total'] as int?;
+          }
+          
+          if (data != null) {
+            if (data.isEmpty) {
+              // 当前页没有数据，停止分页
+              hasMoreData = false;
+            } else {
+              // 添加当前页数据
+              allData.addAll(data.cast<Map<String, dynamic>>());
+              
+              // 判断是否还有更多数据
+              bool shouldContinue = true;
+              
+              // 方式1: 通过totalCount判断（最准确）
+              if (totalCount != null && allData.length >= totalCount) {
+                shouldContinue = false;
+              }
+              // 方式2: 如果当前页数据少于页面大小，说明已到最后一页
+              else if (data.length < 10) {
+                shouldContinue = false;
+              }
+              
+              if (shouldContinue) {
+                currentPage++;
+              } else {
+                hasMoreData = false;
+              }
+            }
+          } else {
+            // API返回失败或没有数据
+            hasMoreData = false;
+          }
         } else {
-          return ApiResult.failure(responseData['Message'] ?? '获取课程类型失败');
+          // HTTP请求失败，停止分页
+          hasMoreData = false;
         }
-      } else {
-        return ApiResult.failure('网络请求失败: ${response.statusCode}');
+      } catch (e) {
+        // 出现异常，停止分页
+        hasMoreData = false;
       }
-    } catch (e) {
-      return ApiResult.failure('获取课程类型时发生错误: $e');
     }
+
+    return allData;
   }
 
-  // 校本课程 - 获取课程列表
-  static Future<ApiResult<List<Course>>> getSchoolBasedCourses(String typeId) async {
-    try {
-      final timestamp = _getTimestamp();
-      final response = await http.post(
-        Uri.parse('$baseUrl/ApiBooking/GetCourseList?t=$timestamp'),
-        headers: await _getHeaders(),
-        body: jsonEncode({
-          'More': typeId,
-          'page': 1,
-          'limit': 100,
-          'keywords': '',
-        }),
-      );
-
-      if (response.statusCode == 200) {
-        final responseData = jsonDecode(response.body);
-        
-        if (responseData['Success'] == true) {
-          final data = responseData['Data'] as List;
-          final courses = data.map((item) => Course.fromJson(item)).toList();
-          return ApiResult.success(courses);
-        } else {
-          return ApiResult.failure(responseData['Message'] ?? '获取课程列表失败');
-        }
-      } else {
-        return ApiResult.failure('网络请求失败: ${response.statusCode}');
-      }
-    } catch (e) {
-      return ApiResult.failure('获取课程列表时发生错误: $e');
-    }
+  // 获取所有可报名的校本课程
+  static Future<ApiResult<List<Course>>> getAllSchoolBasedCourses({bool isSecondAccount = false}) async {
+    final courses = await _fetchAllPages(
+      endpoint: '/ApiBooking/GetTypeList',
+      baseParams: {'keywords': ''},
+      isSecondAccount: isSecondAccount,
+    );
+    return ApiResult.success(courses.map((e) => Course.fromJson(e)).toList());
   }
 
-  // 校本课程 - 选课确认 (支持双账号)
-  static Future<ApiResult<String>> bookSchoolBasedCourse(String courseId, {bool isSecondAccount = false}) async {
-    try {
-      final timestamp = _getTimestamp();
-      final response = await http.post(
-        Uri.parse('$baseUrl/ApiBooking/SetBooking?t=$timestamp'),
-        headers: await _getHeaders(isSecondAccount: isSecondAccount),
-        body: jsonEncode({
-          'More': courseId,
-        }),
-      );
-
-      if (response.statusCode == 200) {
-        final responseData = jsonDecode(response.body);
-        
-        if (responseData['Success'] == true) {
-          return ApiResult.success('选课成功');
-        } else {
-          return ApiResult.failure(responseData['Message'] ?? '选课失败');
-        }
-      } else {
-        return ApiResult.failure('网络请求失败: ${response.statusCode}');
-      }
-    } catch (e) {
-      return ApiResult.failure('选课时发生错误: $e');
-    }
+  // 获取所有可报名的社团课程
+  static Future<ApiResult<List<Course>>> getAllCommunityCourses({bool isSecondAccount = false}) async {
+    final courses = await _fetchAllPages(
+      endpoint: '/ApiCommunityClass/GetTypeList',
+      baseParams: {'keywords': ''},
+      isSecondAccount: isSecondAccount,
+    );
+    return ApiResult.success(courses.map((e) => Course.fromJson(e)).toList());
   }
 
-  // 社团课程 - 获取社团类型列表
-  static Future<ApiResult<List<CourseType>>> getCommunityCourseTypes() async {
-    try {
-      final timestamp = _getTimestamp();
-      final headers = await _getHeaders();
-      final url = '$baseUrl/ApiCommunityClass/GetTypeList?t=$timestamp';
-      
-      final response = await http.post(
-        Uri.parse(url),
-        headers: headers,
-        body: jsonEncode({
-          'page': 1,
-          'limit': 100,
-          'keywords': '',
-        }),
-      );
-
-      if (response.statusCode == 200) {
-        final responseData = jsonDecode(response.body);
-        
-        if (responseData['Success'] == true) {
-          final data = responseData['Data'] as List;
-          final types = data.map((item) => CourseType.fromJson(item)).toList();
-          return ApiResult.success(types);
-        } else {
-          return ApiResult.failure(responseData['Message'] ?? '获取社团类型失败');
-        }
-      } else {
-        return ApiResult.failure('网络请求失败: ${response.statusCode}');
-      }
-    } catch (e) {
-      return ApiResult.failure('获取社团类型时发生错误: $e');
-    }
-  }
-
-  // 社团课程 - 获取社团课程列表
-  static Future<ApiResult<List<Course>>> getCommunityCourses(String typeId) async {
-    try {
-      final timestamp = _getTimestamp();
-      final response = await http.post(
-        Uri.parse('$baseUrl/ApiCommunityClass/GetCourseList?t=$timestamp'),
-        headers: await _getHeaders(),
-        body: jsonEncode({
-          'More': typeId,
-          'page': 1,
-          'limit': 100,
-          'keywords': '',
-        }),
-      );
-
-      if (response.statusCode == 200) {
-        final responseData = jsonDecode(response.body);
-        
-        if (responseData['Success'] == true) {
-          final data = responseData['Data'] as List;
-          final courses = data.map((item) => Course.fromJson(item)).toList();
-          return ApiResult.success(courses);
-        } else {
-          return ApiResult.failure(responseData['Message'] ?? '获取社团课程列表失败');
-        }
-      } else {
-        return ApiResult.failure('网络请求失败: ${response.statusCode}');
-      }
-    } catch (e) {
-      return ApiResult.failure('获取社团课程列表时发生错误: $e');
-    }
-  }
-
-  // 社团课程 - 选课确认 (支持双账号)
-  static Future<ApiResult<String>> bookCommunityCourse(String courseId, {bool isSecondAccount = false}) async {
-    try {
-      final timestamp = _getTimestamp();
-      final response = await http.post(
-        Uri.parse('$baseUrl/ApiCommunityClass/SetBooking?t=$timestamp'),
-        headers: await _getHeaders(isSecondAccount: isSecondAccount),
-        body: jsonEncode({
-          'More': courseId,
-        }),
-      );
-
-      if (response.statusCode == 200) {
-        final responseData = jsonDecode(response.body);
-        
-        if (responseData['Success'] == true) {
-          return ApiResult.success('选课成功');
-        } else {
-          return ApiResult.failure(responseData['Message'] ?? '选课失败');
-        }
-      } else {
-        return ApiResult.failure('网络请求失败: ${response.statusCode}');
-      }
-    } catch (e) {
-      return ApiResult.failure('选课时发生错误: $e');
-    }
-  }
-
-  // 获取校本课程
+  // 获取已报名的校本课程
   static Future<ApiResult<List<Course>>> getMySchoolBasedCourses({bool isSecondAccount = false}) async {
-    try {
-      final timestamp = _getTimestamp();
-      final headers = await _getHeaders(isSecondAccount: isSecondAccount);
-      final url = '$baseUrl/ApiBooking/GetCourses?t=$timestamp';
+    // 并行获取已审核和未审核的课程
+    final unreviewedCourses = await _fetchAllPages(
+      endpoint: '/ApiBooking/GetCourses', 
+      baseParams: {'More': 1, 'keywords': ''}, 
+      isSecondAccount: isSecondAccount
+    );
+    final reviewedCourses = await _fetchAllPages(
+      endpoint: '/ApiBooking/GetCourses',
+      baseParams: {'More': 0, 'keywords': ''},
+      isSecondAccount: isSecondAccount
+    );
+    
+    final allCoursesRaw = [...unreviewedCourses, ...reviewedCourses];
       
-      
-      final response = await http.post(
-        Uri.parse(url),
-        headers: headers,
-        body: jsonEncode({
-          'More': 0, // 0表示已审核的课程
-          'page': 1,
-          'limit': 100,
-          'keywords': '',
-        }),
-      );
-
-
-      if (response.statusCode == 200) {
-        final responseData = jsonDecode(response.body);
-        
-        // 即使Success为false，只要有数据就认为成功
-        if (responseData['Data'] != null && responseData['Data'] is List) {
-          final data = responseData['Data'] as List;
-          if (data.isNotEmpty) {
-            final courses = data.map((item) => Course.fromJson(item)).toList();
-            return ApiResult.success(courses);
-          }
-        }
-        
-        // 如果没有数据，检查Success字段
-        if (responseData['Success'] == true) {
-          final data = responseData['Data'] as List;
-          final courses = data.map((item) => Course.fromJson(item)).toList();
-          return ApiResult.success(courses);
-        } else {
-          return ApiResult.failure(responseData['Message'] ?? '获取已报名课程失败');
-        }
-      } else {
-        return ApiResult.failure('网络请求失败: ${response.statusCode}');
+    // 根据课程ID去重
+    final Map<String, Map<String, dynamic>> uniqueCourses = {};
+    for (final courseData in allCoursesRaw) {
+      final courseId = courseData['CourseId']?.toString() ?? 
+                      courseData['courseId']?.toString() ?? 
+                      courseData['Id']?.toString() ?? '';
+      if (courseId.isNotEmpty) {
+        uniqueCourses[courseId] = courseData;
       }
-    } catch (e) {
-      return ApiResult.failure('获取已报名课程时发生错误: $e');
     }
+    
+    return ApiResult.success(uniqueCourses.values.map((item) => Course.fromJson(item)).toList());
   }
 
-  // 获取社团课程
+  // 获取社团课程（包括已审核和未审核）
   static Future<ApiResult<List<Course>>> getMyCommunityCourses({bool isSecondAccount = false}) async {
+    // 并行获取已审核和未审核的课程
+    final unreviewedCourses = await _fetchAllPages(
+      endpoint: '/ApiCommunityClass/GetCourses',
+      baseParams: {'More': 1, 'keywords': ''},
+      isSecondAccount: isSecondAccount
+    );
+    final reviewedCourses = await _fetchAllPages(
+      endpoint: '/ApiCommunityClass/GetCourses',
+      baseParams: {'More': 0, 'keywords': ''},
+      isSecondAccount: isSecondAccount
+    );
+
+    final allCoursesRaw = [...unreviewedCourses, ...reviewedCourses];
+      
+    // 根据课程ID去重
+    final Map<String, Map<String, dynamic>> uniqueCourses = {};
+    for (final courseData in allCoursesRaw) {
+      final courseId = courseData['CourseId']?.toString() ?? 
+                      courseData['courseId']?.toString() ?? 
+                      courseData['Id']?.toString() ?? '';
+      if (courseId.isNotEmpty) {
+        uniqueCourses[courseId] = courseData;
+      }
+    }
+    
+    return ApiResult.success(uniqueCourses.values.map((item) => Course.fromJson(item)).toList());
+  }
+
+  static Future<ApiResult<Map<String, dynamic>>> bookSchoolBasedCourse(String courseId, {bool isSecondAccount = false}) async {
+    return _bookCourse(
+      endpoint: '/ApiBooking/SetBooking',
+      courseId: courseId,
+      isSecondAccount: isSecondAccount
+    );
+  }
+
+  static Future<ApiResult<Map<String, dynamic>>> bookCommunityCourse(String courseId, {bool isSecondAccount = false}) async {
+    return _bookCourse(
+      endpoint: '/ApiCommunityClass/SetBooking',
+      courseId: courseId,
+      isSecondAccount: isSecondAccount
+    );
+  }
+
+  // 自动抢课专用 - 根据关键词获取相关课程（带完整分页）
+  static Future<ApiResult<List<Course>>> getAvailableCoursesForAutoBooking(
+    bool isSchoolBased, 
+    String keywords,
+    {bool isSecondAccount = false}
+  ) async {
+    final endpoint = isSchoolBased ? '/ApiBooking/GetTypeList' : '/ApiCommunityClass/GetTypeList';
+    try {
+      final courses = await _fetchAllPages(
+        endpoint: endpoint,
+        baseParams: {'keywords': keywords},
+        isSecondAccount: isSecondAccount,
+      );
+      return ApiResult.success(courses.map((e) => Course.fromJson(e)).toList());
+    } catch (e) {
+      return ApiResult.failure('获取可用课程时发生错误: $e');
+    }
+  }
+  
+  // 通用预定课程逻辑
+  static Future<ApiResult<Map<String, dynamic>>> _bookCourse({
+    required String endpoint,
+    required String courseId,
+    bool isSecondAccount = false,
+  }) async {
     try {
       final timestamp = _getTimestamp();
       final headers = await _getHeaders(isSecondAccount: isSecondAccount);
-      final url = '$baseUrl/ApiCommunityClass/GetCourses?t=$timestamp';
-      
-      
       final response = await http.post(
-        Uri.parse(url),
+        Uri.parse('$baseUrl$endpoint?t=$timestamp'),
         headers: headers,
-        body: jsonEncode({
-          'More': 0, // 0表示已审核的课程
-          'page': 1,
-          'limit': 100,
-          'keywords': '',
-        }),
+        body: jsonEncode({'More': courseId}),
       );
-
 
       if (response.statusCode == 200) {
         final responseData = jsonDecode(response.body);
-        
-        // 即使Success为false，只要有数据就认为成功
-        if (responseData['Data'] != null && responseData['Data'] is List) {
-          final data = responseData['Data'] as List;
-          if (data.isNotEmpty) {
-            final courses = data.map((item) => Course.fromJson(item)).toList();
-            return ApiResult.success(courses);
-          }
-        }
-        
-        // 如果没有数据，检查Success字段
         if (responseData['Success'] == true) {
-          final data = responseData['Data'] as List;
-          final courses = data.map((item) => Course.fromJson(item)).toList();
-          return ApiResult.success(courses);
+          // 成功预定
+          return ApiResult.success({'message': responseData['Message'] ?? '预定成功'});
         } else {
-          return ApiResult.failure(responseData['Message'] ?? '获取已报名课程失败');
+          return ApiResult.failure(responseData['Message'] ?? '预定失败');
         }
       } else {
-        return ApiResult.failure('网络请求失败: ${response.statusCode}');
+        return ApiResult.failure('服务器错误: ${response.statusCode}');
       }
     } catch (e) {
-      return ApiResult.failure('获取已报名课程时发生错误: $e');
+      return ApiResult.failure('网络错误: $e');
     }
   }
 }
@@ -391,14 +339,18 @@ class Course {
   });
 
   factory Course.fromJson(Map<String, dynamic> json) {
-    // TeacherNot是教师名字，TeacherName是负责人，优先使用TeacherNot
+    // 优先使用TeacherNot，然后是TeacherName，最后是Teacher，并兼容大小写和空字符串
     String? teacher;
-    if (json['TeacherNot'] != null && json['TeacherNot'].toString().isNotEmpty) {
-      teacher = json['TeacherNot'].toString();
-    } else if (json['TeacherName'] != null && json['TeacherName'].toString().isNotEmpty) {
-      teacher = json['TeacherName'].toString();
-    } else {
-      teacher = json['Teacher'];
+    final dynamic teacherNot = json['TeacherNot'] ?? json['teacherNot'];
+    final dynamic teacherName = json['TeacherName'] ?? json['teacherName'];
+    final dynamic teacherField = json['Teacher'] ?? json['teacher'];
+
+    if (teacherNot != null && teacherNot.toString().trim().isNotEmpty) {
+      teacher = teacherNot.toString();
+    } else if (teacherName != null && teacherName.toString().trim().isNotEmpty) {
+      teacher = teacherName.toString();
+    } else if (teacherField != null && teacherField.toString().trim().isNotEmpty) {
+      teacher = teacherField.toString();
     }
     
     // 兼容字段命名

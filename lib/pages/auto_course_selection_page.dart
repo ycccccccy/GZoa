@@ -1,10 +1,8 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:http/http.dart' as http;
 import '../services/course_service.dart';
 import '../services/auth_service.dart';
 import '../utils/status_bar_utils.dart';
@@ -61,14 +59,13 @@ class _AutoCourseSelectionPageState extends State<AutoCourseSelectionPage> with 
   @override
   void initState() {
     super.initState();
-    // 状态栏样式
     StatusBarUtils.setLightStatusBar();
     _loadApiToken();
-    // 简化版本：不再从持久化存储加载第二账号
   }
 
   @override
   void dispose() {
+    _cleanupSecondAccount(); // 页面销毁时清除第二账号的临时信息
     _courseNameController.dispose();
     _hourController.dispose();
     _minuteController.dispose();
@@ -78,6 +75,13 @@ class _AutoCourseSelectionPageState extends State<AutoCourseSelectionPage> with 
     _countdownTimer?.cancel();
     _courseSearchTimer?.cancel();
     super.dispose();
+  }
+
+  // 清除第二账号的临时信息
+  Future<void> _cleanupSecondAccount() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('account2_apiToken');
+    await prefs.remove('account2_userName');
   }
 
   Future<void> _loadApiToken() async {
@@ -97,75 +101,14 @@ class _AutoCourseSelectionPageState extends State<AutoCourseSelectionPage> with 
     return _mainAccountUserName.isNotEmpty ? _mainAccountUserName : '主账号';
   }
 
-  // 使用指定token进行抢课的简化方法
-  Future<ApiResult<dynamic>> _bookCourseWithToken(String courseId, String token) async {
-    try {
-      final String apiUrl = _isSchoolBased 
-          ? '${CourseService.baseUrl}/ApiBooking/SetBooking'
-          : '${CourseService.baseUrl}/ApiCommunityClass/SetBooking';
-      
-      final timestamp = DateTime.now().millisecondsSinceEpoch.toString();
-      final response = await http.post(
-        Uri.parse('$apiUrl?t=$timestamp'),
-        headers: {
-          'Content-Type': 'application/json; charset=UTF-8',
-          'token': token,
-          'User-Agent': 'Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-          'Accept': 'application/json, text/plain, */*',
-          'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-        },
-        body: jsonEncode({
-          'More': courseId,
-          't': timestamp,
-        }),
-      );
-
-      if (response.statusCode == 200) {
-        final responseData = jsonDecode(response.body);
-        if (responseData['Success'] == true) {
-          return ApiResult.success(responseData['Data']);
-        } else {
-          return ApiResult.failure(responseData['Message'] ?? '抢课失败');
-        }
-      } else {
-        return ApiResult.failure('网络请求失败: ${response.statusCode}');
-      }
-    } catch (e) {
-      return ApiResult.failure('抢课过程中发生错误: $e');
-    }
-  }
-
-  // 使用指定token获取我的课程
+  // 使用指定token获取我的课程，直接使用CourseService方法
   Future<ApiResult<List<Course>>> _getMyCoursesWithToken(String token) async {
     try {
-      final String apiUrl = _isSchoolBased 
-          ? '${CourseService.baseUrl}/ApiBooking/GetCourses'
-          : '${CourseService.baseUrl}/ApiCommunityClass/GetCourses';
-      
-      final timestamp = DateTime.now().millisecondsSinceEpoch.toString();
-      final response = await http.post(
-        Uri.parse('$apiUrl?t=$timestamp'),
-        headers: {
-          'Content-Type': 'application/json; charset=UTF-8',
-          'token': token,
-          'User-Agent': 'Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-          'Accept': 'application/json, text/plain, */*',
-          'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-        },
-        body: jsonEncode({}),
-      );
-
-      if (response.statusCode == 200) {
-        final responseData = jsonDecode(response.body);
-        if (responseData['Success'] == true && responseData['Data'] != null) {
-          final List<dynamic> coursesData = responseData['Data'];
-          final courses = coursesData.map((json) => Course.fromJson(json)).toList();
-          return ApiResult.success(courses);
-        } else {
-          return ApiResult.failure(responseData['Message'] ?? '获取课程失败');
-        }
+      // 使用CourseService的分页拉取方法，根据课程类型选择
+      if (_isSchoolBased) {
+        return await CourseService.getMySchoolBasedCourses(isSecondAccount: token != _apiToken);
       } else {
-        return ApiResult.failure('网络请求失败: ${response.statusCode}');
+        return await CourseService.getMyCommunityCourses(isSecondAccount: token != _apiToken);
       }
     } catch (e) {
       return ApiResult.failure('获取课程过程中发生错误: $e');
@@ -180,17 +123,29 @@ class _AutoCourseSelectionPageState extends State<AutoCourseSelectionPage> with 
     }
 
     try {
-      // 直接调用登录API，不使用复杂的存储逻辑，只临时保存token
+      // 直接调用登录API，只临时保存token
       final result = await AuthService.login(
         _secondUserNameController.text.trim(),
         _secondPasswordController.text.trim(),
       );
 
       if (result.isSuccess && result.apiToken != null) {
+        // 登录成功后，将第二个账号的信息临时保存
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('account2_apiToken', result.apiToken!);
+        
+        // 如果API没有返回用户名，则使用学号作为备用名
+        final apiUserName = result.userName;
+        final userName = (apiUserName != null && apiUserName.isNotEmpty)
+                         ? apiUserName
+                         : _secondUserNameController.text.trim();
+        
+        await prefs.setString('account2_userName', userName);
+
         setState(() {
           _hasSecondAccount = true;
           _secondAccountToken = result.apiToken!; // 临时存储token
-          _secondAccountUserName = result.userName ?? _secondUserNameController.text.trim(); // 优先使用服务器返回的用户名
+          _secondAccountUserName = userName; // 优先使用服务器返回的用户名
           _isAddingSecondAccount = false;
           _secondUserNameController.clear();
           _secondPasswordController.clear();
@@ -205,7 +160,12 @@ class _AutoCourseSelectionPageState extends State<AutoCourseSelectionPage> with 
   }
 
   Future<void> _removeSecondAccount() async {
-    // 简化版本：只清空本地状态，不涉及持久化存储
+    // 从持久化存储中移除第二个账号的信息
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('account2_apiToken');
+    await prefs.remove('account2_userName');
+
+    // 清空本地状态
     setState(() {
       _hasSecondAccount = false;
       _secondAccountToken = null;
@@ -788,7 +748,7 @@ class _AutoCourseSelectionPageState extends State<AutoCourseSelectionPage> with 
                         ),
                         decoration: InputDecoration(
                           hintText: '14',
-                          counterText: '', // 隐藏字符计数器
+                          counterText: '',
                           hintStyle: TextStyle(
                             color: Colors.grey[400],
                             fontSize: 24,
@@ -1114,7 +1074,7 @@ class _AutoCourseSelectionPageState extends State<AutoCourseSelectionPage> with 
               );
             },
           ),
-          // 成功状态的额外动画效果
+          // 成功状态的动画效果
           if (isSuccess) ...[
             const SizedBox(height: 16),
             TweenAnimationBuilder<double>(
@@ -1649,24 +1609,12 @@ class _AutoCourseSelectionPageState extends State<AutoCourseSelectionPage> with 
 
 
   // 处理课程数据并进行匹配
-  void _processCourseData(List<dynamic> coursesData) {
+  void _processCourseData(List<Course> courses) {
     final keywords = _courseNameController.text.trim().toLowerCase().split('/');
     final List<Course> newMatchedCourses = [];
     
-    for (final courseData in coursesData) {
+    for (final course in courses) {
       try {
-        // 转换为Course对象
-        final course = Course(
-          id: courseData['CourseId']?.toString() ?? '',
-          name: courseData['CourseName']?.toString() ?? '',
-          teacher: courseData['TeacherName']?.toString(),
-          location: courseData['Address']?.toString(),
-          time: courseData['CreateTime']?.toString(),
-          enrolled: courseData['Enrolled'] ?? 0,
-          capacity: courseData['MaxTypeNum'] ?? 0,
-          isAvailable: courseData['IsAvailable'] ?? true,
-        );
-
         // 计算匹配度
         final matchScore = _calculateMatchScore(course.name.toLowerCase(), keywords);
         
@@ -1887,66 +1835,56 @@ class _AutoCourseSelectionPageState extends State<AutoCourseSelectionPage> with 
     _searchAttempts++;
     
     try {
-      final String apiUrl = _isSchoolBased 
-          ? '${CourseService.baseUrl}/ApiBooking/GetCourseList'
-          : '${CourseService.baseUrl}/ApiCommunityClass/GetCourseList';
+      // 获取用户输入的第一个关键词进行精确查询
+      final allKeywords = _courseNameController.text.trim().split('/');
+      final firstKeyword = allKeywords.isNotEmpty ? allKeywords[0].trim() : '';
       
-      final timestamp = DateTime.now().millisecondsSinceEpoch.toString();
-      final response = await http.post(
-        Uri.parse('$apiUrl?t=$timestamp'),
-        headers: {
-          'Content-Type': 'application/json; charset=UTF-8',
-          'User-Agent': 'Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-          'Accept': 'application/json, text/plain, */*',
-          'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-        },
-        body: jsonEncode({
-          'More': '1',
-          'page': 1,
-          'limit': 50,
-          'keywords': null,
-        }),
-      );
-
-      if (response.statusCode == 200) {
-        final responseData = jsonDecode(response.body);
+      // 更新搜索状态
+      setState(() {
+        _status = '搜索中...使用关键词:"$firstKeyword"${allKeywords.length > 1 ? ' (将从结果中进一步筛选)' : ''}';
+        if (_hasSecondAccount) {
+          _account1Status = '搜索中...使用关键词:"$firstKeyword"';
+          _account2Status = '搜索中...使用关键词:"$firstKeyword"';
+        }
+      });
+      
+      // 使用CourseService的完整分页拉取方法，传入第一个关键词
+      final result = await CourseService.getAvailableCoursesForAutoBooking(_isSchoolBased, firstKeyword);
+      
+      if (result.isSuccess && result.data != null) {
+        final courses = result.data!;
         
-        if (responseData['Success'] == true && responseData['Data'] != null) {
-          final List<dynamic> courses = responseData['Data'];
+        if (courses.isNotEmpty) {
+          // 找到课程数据了，重置空结果计数
+          _emptyResultCount = 0;
+          // 直接处理课程数据
+          _processCourseData(courses);
           
-          if (courses.isNotEmpty) {
-            // 找到课程数据了，重置空结果计数
-            _emptyResultCount = 0;
-            _processCourseData(courses);
-            
-            // 再次检查状态，确保不会在抢课过程中覆盖状态
-            if (_isRunning && _isSearching) {
-              setState(() {
-                _status = '找到 ${courses.length} 个课程，最高匹配度: ${_bestMatchScore.toStringAsFixed(2)}';
-                if (_hasSecondAccount) {
-                  _account1Status = '发现课程，准备抢课...';
-                  _account2Status = '发现课程，准备抢课...';
-                }
-              });
-            }
-            
-            if (_matchedCourses.isNotEmpty && _bestMatchedCourseId.isNotEmpty) {
-              // 找到匹配的课程，返回true停止搜索
-              return true;
-            }
-          } else {
-            // 空结果，增加计数
-            _emptyResultCount++;
-            _handleEmptyResult();
+          // 再次检查状态，确保不会在抢课过程中覆盖状态
+          if (_isRunning && _isSearching) {
+            setState(() {
+              _status = '找到 ${courses.length} 个课程，最高匹配度: ${_bestMatchScore.toStringAsFixed(2)}';
+              if (_hasSecondAccount) {
+                _account1Status = '发现课程，准备抢课...';
+                _account2Status = '发现课程，准备抢课...';
+              }
+            });
+          }
+          
+          if (_matchedCourses.isNotEmpty && _bestMatchedCourseId.isNotEmpty) {
+            // 找到匹配的课程，返回true停止搜索
+            return true;
           }
         } else {
-          // API调用失败或无数据，也算空结果
+          // 空结果，增加计数
           _emptyResultCount++;
           _handleEmptyResult();
         }
+      } else {
+        // API调用失败或无数据，也算空结果
+        _emptyResultCount++;
+        _handleEmptyResult();
       }
-
-      
     } catch (e) {
       _emptyResultCount++;
       _handleEmptyResult();
@@ -2057,8 +1995,9 @@ class _AutoCourseSelectionPageState extends State<AutoCourseSelectionPage> with 
     while (retryCount < maxRetries) {
     try {
       // 根据账号类型选择合适的token进行抢课
-      final token = isSecondAccount ? _secondAccountToken : _apiToken;
-      final result = await _bookCourseWithToken(courseId, token!);
+      final result = _isSchoolBased
+          ? await CourseService.bookSchoolBasedCourse(courseId, isSecondAccount: isSecondAccount)
+          : await CourseService.bookCommunityCourse(courseId, isSecondAccount: isSecondAccount);
 
       if (result.isSuccess) {
         // 报名成功，进行确认检查

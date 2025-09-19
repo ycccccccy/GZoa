@@ -5,6 +5,8 @@ import 'utils/platform_utils.dart';
 import 'utils/status_bar_utils.dart';
 import 'pages/login_page.dart';
 import 'pages/course_selection_page.dart';
+import 'pages/privacy_agreement_page.dart';
+import 'services/privacy_service.dart';
 import 'config/env_config.dart';
 
 void main() async {
@@ -162,32 +164,42 @@ class AuthWrapper extends StatefulWidget {
 
 class _AuthWrapperState extends State<AuthWrapper> {
   bool _isLoading = true;
+  bool _hasAcceptedPrivacy = false;
   bool _isLoggedIn = false;
 
   @override
   void initState() {
     super.initState();
-    _checkLoginStatus();
+    _checkAppStatus();
   }
 
-  Future<void> _checkLoginStatus() async {
+  Future<void> _checkAppStatus() async {
     try {
       // 添加延迟以确保SharedPreferences完全初始化
       await Future.delayed(const Duration(milliseconds: 100));
       
-      final prefs = await SharedPreferences.getInstance();
-      final isLoggedIn = prefs.getBool('isLoggedIn') ?? false;
-      final apiToken = prefs.getString('apiToken');
+      // 首先检查隐私协议状态
+      final hasAcceptedPrivacy = await PrivacyService.hasAcceptedPrivacy();
       
-      // 验证token是否存在，确保登录状态有效
-      final validLogin = isLoggedIn && apiToken != null && apiToken.isNotEmpty;
+      // 如果用户已同意隐私协议，再检查登录状态
+      bool validLogin = false;
+      if (hasAcceptedPrivacy) {
+        final prefs = await SharedPreferences.getInstance();
+        final isLoggedIn = prefs.getBool('isLoggedIn') ?? false;
+        final apiToken = prefs.getString('apiToken');
+        
+        // 验证token是否存在，确保登录状态有效
+        validLogin = isLoggedIn && apiToken != null && apiToken.isNotEmpty;
+      }
       
       setState(() {
+        _hasAcceptedPrivacy = hasAcceptedPrivacy;
         _isLoggedIn = validLogin;
         _isLoading = false;
       });
     } catch (e) {
       setState(() {
+        _hasAcceptedPrivacy = false;
         _isLoggedIn = false;
         _isLoading = false;
       });
@@ -207,6 +219,13 @@ class _AuthWrapperState extends State<AuthWrapper> {
       );
     }
 
-    return _isLoggedIn ? const CourseSelectionPage() : const LoginPage();
+    // 根据状态决定显示哪个页面
+    if (!_hasAcceptedPrivacy) {
+      return const PrivacyAgreementPage();
+    } else if (_isLoggedIn) {
+      return const CourseSelectionPage();
+    } else {
+      return const LoginPage();
+    }
   }
 }

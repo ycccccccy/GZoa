@@ -7,7 +7,8 @@ import '../config/env_config.dart';
 
 class AuthService {
   static String get baseUrl => EnvConfig.instance.baseUrl;
-  static String get loginEndpoint => '$baseUrl/ApiStudent/Login';
+  // 强制让登录接口走远程服务器
+  static String get loginEndpoint => '${EnvConfig.instance.remoteBaseUrl}/ApiStudent/Login';
   
   // 双账号存储键
   static const String account1TokenKey = 'account1_apiToken';
